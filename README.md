@@ -1,7 +1,8 @@
 # FIAP Cloud Games - CatalogAPI
 
-Microsservico de catalogo da Fase 2 do Tech Challenge FIAP. Ele e responsavel
-pelo CRUD de jogos, pela solicitacao de compra e pela biblioteca do usuario.
+Microsserviço de catálogo evoluído para a Fase 3 do Tech Challenge FIAP.
+Mantém CRUD, compra e biblioteca, acrescentando Redis às consultas públicas.
+A baseline da Fase 2 está preservada na tag `fase-2-final`.
 
 ## Responsabilidades
 
@@ -23,7 +24,7 @@ pelo CRUD de jogos, pela solicitacao de compra e pela biblioteca do usuario.
 - `DELETE /api/games/{id}`: desativa jogo, exige JWT com role `Admin`.
 - `GET /api/me/library/games`: lista biblioteca do usuario autenticado.
 - `POST /api/me/library/games/{gameId}`: solicita compra do jogo autenticado.
-- `GET /health`: readiness com SQL Server e RabbitMQ.
+- `GET /health`: SQL Server/RabbitMQ obrigatórios; Redis indisponível retorna `Degraded` com HTTP 200.
 - `GET /health/live`: liveness do processo.
 
 ## Variaveis de ambiente
@@ -40,6 +41,49 @@ pelo CRUD de jogos, pela solicitacao de compra e pela biblioteca do usuario.
 | `RabbitMq__Username` | Usuario do RabbitMQ. |
 | `RabbitMq__Password` | Senha do RabbitMQ. |
 | `RabbitMq__PaymentProcessedQueue` | Fila do consumidor de resultado de pagamento. |
+| `CatalogCache__Configuration` | Conexão Redis, padrão `localhost:6379`; use Secret se incluir senha. |
+| `CatalogCache__TtlSeconds` | TTL absoluto: padrão 60 segundos, permitido 1–300. |
+| `CatalogCache__TimeoutMilliseconds` | Timeout Redis: padrão 500 ms, permitido 100–2000. |
+
+## Cache distribuído da Fase 3
+
+`CachedGameCatalogService` usa `IDistributedCache` com
+`Microsoft.Extensions.Caching.StackExchangeRedis` 8.0.28. Reaproveita
+`GameCatalogService` para SQL e mutações, preservando o contrato HTTP.
+
+| Consulta pública | Chave Redis |
+|---|---|
+| Lista de jogos ativos, ordenada por título | `fcg:catalog:v1:games:active:title-asc` |
+| Detalhe de jogo ativo | `fcg:catalog:v1:game:{id}` com GUID canônico |
+
+As rotas atuais não aceitam filtros/paginação que alterem a resposta. Se forem
+adicionados, as chaves devem incluir esses parâmetros. Cache não depende de JWT;
+compra e biblioteca continuam usando SQL diretamente. Respostas 404 não são
+armazenadas. Cache miss consulta SQL e grava JSON; hit evita essa consulta.
+TTL é absoluto, contado desde antes da consulta SQL, e não é renovado por hits.
+
+Após create/update/delete confirmado no SQL, remove a lista e o detalhe afetado.
+Falhas da mutação não invalidam. Ambas as remoções são tentadas mesmo se uma
+falhar ou se o cliente cancelar depois do commit. Não há transação SQL/Redis:
+invalidação malsucedida ou leitura concorrente à alteração pode manter dado
+antigo até o TTL. O cache é descartável e não deve ser usado para decidir preços
+de compra ou invariantes; esses caminhos continuam consultando SQL.
+
+Falhas Redis em leitura/gravação/invalidação são registradas sem connection
+strings; leituras retornam SQL e escritas confirmadas não viram erro do negócio.
+Payload JSON inválido é recarregado. Cancelamento do cliente continua respeitado
+nas leituras. A conexão não bloqueia startup, usa fail-fast sem fila de comandos
+durante desconexão e tenta reconectar automaticamente. Timeouts são limites do
+cliente Redis, sujeitos ao agendamento/heartbeat, não SLA HTTP rígido.
+
+`/health` retorna `Healthy` quando tudo funciona e `Degraded`/200 com Redis fora;
+falha SQL/RabbitMQ continua `Unhealthy`/503. `/health/live` independe de serviços.
+Redis não deve ser condição obrigatória de startup/readiness no ambiente final.
+
+Validação: 29 testes locais (19 herdados e 10 de cache), incluindo contagem de
+SELECTs por interceptor EF/SQLite. Ensaio com SQL Server e Redis reais passou
+em 21 verificações, com zero SELECTs nos hits e recuperação após indisponibilidade.
+[Guia e evidências da etapa 5](https://github.com/arthuurqueirozz/tech-challenge-3-orchestration/blob/main/docs/ETAPA-5.md).
 
 ## Desenvolvimento local
 
@@ -47,13 +91,14 @@ Requisitos:
 
 - SDK .NET 8;
 - SQL Server;
-- RabbitMQ.
+- RabbitMQ;
+- Redis (a API opera degradada se ele estiver indisponível).
 
 Comandos:
 
 ```bash
 dotnet restore TechChallenge.Catalog.sln
-dotnet test TechChallenge.Catalog.sln --configuration Release --no-restore
+dotnet run --project tests/FCG.Catalog.Tests/FCG.Catalog.Tests.csproj --configuration Release
 dotnet run --project src/FCG.Catalog.Api/FCG.Catalog.Api.csproj
 ```
 
@@ -67,6 +112,7 @@ export ConnectionStrings__CatalogDatabase='Server=localhost,1433;Database=FcgCat
 export Jwt__Key='<same-32-byte-or-longer-key-used-by-users-api>'
 export RabbitMq__Username='<rabbitmq-username>'
 export RabbitMq__Password='<rabbitmq-password>'
+export CatalogCache__Configuration='localhost:6379'
 dotnet run --project src/FCG.Catalog.Api/FCG.Catalog.Api.csproj
 ```
 
@@ -99,173 +145,20 @@ docker run --rm -p 8083:8080 \
   -e RabbitMq__Username="<rabbitmq-username>" \
   -e RabbitMq__Password="<rabbitmq-password>" \
   -e RabbitMq__PaymentProcessedQueue=catalog-payment-processed \
+  -e CatalogCache__Configuration=host.docker.internal:6379 \
   tech-challenge-2-catalog-api:latest
 ```
 
-## Docker Compose integrado
+## Orquestração e Kubernetes
 
-Este repositorio e o local de orquestracao escolhido para a entrega, sem criar
-um quinto repositorio. O `docker-compose.yml` referencia os quatro
-microsservicos como contextos independentes em diretorios irmaos:
+O guia da Fase 3 fica em [tech-challenge-3-orchestration](https://github.com/arthuurqueirozz/tech-challenge-3-orchestration).
+O ensaio do cache usa compose.stage5.yaml desse repositório e não exige AWS.
+Os manifests individuais em k8s receberam configuração de Redis; a stack final
+Kind/Kong/monitoramento ainda será consolidada na orquestração.
 
-```text
-tech-challenge-2-catalog-api/
-tech-challenge-2-users-api/
-tech-challenge-2-payments-api/
-tech-challenge-2-notifications-api/
-```
-
-Crie o arquivo local de variaveis:
-
-```bash
-cp .env.example .env
-```
-
-Preencha os placeholders em `.env`. A chave `TC2_JWT_KEY` deve ter pelo menos
-32 bytes e deve ser a mesma usada por UsersAPI e CatalogAPI. O arquivo `.env`
-nao deve ser versionado.
-
-Suba toda a aplicacao:
-
-```bash
-docker compose up --build -d
-```
-
-Servicos expostos por padrao:
-
-| Servico | URL |
-|---|---|
-| UsersAPI | `http://localhost:18080` |
-| CatalogAPI | `http://localhost:18081` |
-| PaymentsAPI | `http://localhost:18082` |
-| NotificationsAPI | `http://localhost:18083` |
-| RabbitMQ AMQP | `localhost:5672` |
-| RabbitMQ Management | `http://localhost:15672` |
-| SQL Server | `localhost,14333` |
-
-Execute o smoke test do fluxo completo:
-
-```bash
-set -a
-. ./.env
-set +a
-./scripts/smoke-test.sh
-```
-
-O script valida:
-
-- readiness de UsersAPI e CatalogAPI;
-- login do admin inicial;
-- criacao de jogo aprovado e jogo rejeitado;
-- cadastro de usuario;
-- compra aprovada adicionando jogo a biblioteca;
-- compra rejeitada sem adicionar jogo a biblioteca.
-
-Para acompanhar os eventos no video:
-
-```bash
-docker compose logs -f users-api catalog-api payments-api notifications-api
-```
-
-Para limpar containers e dados persistidos:
-
-```bash
-docker compose down -v
-```
-
-## Kubernetes
-
-Os manifests individuais da CatalogAPI ficam em `/k8s`, conforme exigido pelo
-enunciado. O deploy integrado para demonstracao fica em `/k8s/all`, no mesmo
-local de orquestracao do Docker Compose.
-
-O diretorio `k8s/all` contem:
-
-- SQL Server: `Deployment`, `Service` e `Secret` gerado localmente;
-- RabbitMQ: `Deployment`, `Service` e `Secret` gerado localmente;
-- UsersAPI, CatalogAPI, PaymentsAPI e NotificationsAPI: `Deployment`,
-  `Service`, `ConfigMap` e `Secret` gerado localmente.
-
-Crie ou selecione um cluster Kind:
-
-```bash
-kind create cluster --name fiap-cloud-games
-kubectl cluster-info --context kind-fiap-cloud-games
-```
-
-Construa as imagens locais a partir dos quatro repositorios:
-
-```bash
-docker build -t tech-challenge-2-users-api:local ../tech-challenge-2-users-api
-docker build -t tech-challenge-2-catalog-api:local .
-docker build -t tech-challenge-2-payments-api:local ../tech-challenge-2-payments-api
-docker build -t tech-challenge-2-notifications-api:local ../tech-challenge-2-notifications-api
-```
-
-Carregue as imagens no Kind:
-
-```bash
-kind load docker-image tech-challenge-2-users-api:local --name fiap-cloud-games
-kind load docker-image tech-challenge-2-catalog-api:local --name fiap-cloud-games
-kind load docker-image tech-challenge-2-payments-api:local --name fiap-cloud-games
-kind load docker-image tech-challenge-2-notifications-api:local --name fiap-cloud-games
-```
-
-Gere o Secret local a partir das mesmas variaveis usadas no Docker Compose:
-
-```bash
-set -a
-. ./.env
-set +a
-./scripts/render-k8s-secrets.sh
-```
-
-O arquivo `k8s/all/secret.local.yaml` nao deve ser versionado. O template
-`k8s/all/secret.local.yaml.example` mostra a estrutura esperada.
-
-Execute o deploy integrado:
-
-```bash
-cd k8s/all
-kubectl apply -f .
-kubectl get pods
-cd ../..
-```
-
-Aguarde todos os Deployments:
-
-```bash
-kubectl rollout status deployment/sqlserver --timeout=5m
-kubectl rollout status deployment/rabbitmq --timeout=5m
-kubectl rollout status deployment/users-api --timeout=5m
-kubectl rollout status deployment/catalog-api --timeout=5m
-kubectl rollout status deployment/payments-api --timeout=5m
-kubectl rollout status deployment/notifications-api --timeout=5m
-```
-
-Execute o smoke test dentro do cluster usando port-forward:
-
-```bash
-set -a
-. ./.env
-set +a
-./scripts/kind-smoke-test.sh
-```
-
-Para acompanhar os eventos no video:
-
-```bash
-kubectl logs deployment/users-api --tail=80
-kubectl logs deployment/catalog-api --tail=80
-kubectl logs deployment/payments-api --tail=80
-kubectl logs deployment/notifications-api --tail=80
-```
-
-Para remover os recursos do cluster:
-
-```bash
-kubectl delete -f k8s/all
-```
+Os arquivos docker-compose.yml, k8s/all e scripts integrados herdados nesta
+pasta representam a Fase 2. Para reproduzir aquela versão, consulte a tag
+fase-2-final de todos os projetos. Não são o guia de subida da Fase 3.
 
 ## Contratos de eventos
 
