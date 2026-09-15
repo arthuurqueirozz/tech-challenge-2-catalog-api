@@ -1,5 +1,21 @@
 # FIAP Cloud Games - CatalogAPI
 
+## Métricas da Fase 3
+
+`GET /metrics` expõe Prometheus (prometheus-net.AspNetCore 8.2.1).
+`fcg_http_requests_total` conta requisições de negócio; o histograma
+`fcg_http_request_duration_seconds` mede sua duração. Labels: `route` com template
+do endpoint (ou `unmatched`), `method` com verbos conhecidos/`OTHER` e `status_code`.
+GUIDs, usuários, tokens e query strings não viram labels. Somente `/api` entra
+nessas métricas; health e scraping ficam fora. Exceções tratadas mantêm seu status
+HTTP final, inclusive 500, e o tempo observado inclui o processamento da resposta.
+
+Dashboard e manifests no [guia da etapa 6](https://github.com/arthuurqueirozz/tech-challenge-3-orchestration/blob/main/docs/ETAPA-6.md).
+O scraper acrescenta `job=catalog-api`. `/metrics` permanece interno ao cluster;
+o gateway final não deve expor essa rota. Contadores reiniciam com o processo;
+taxas usam `rate`. Gate: 30 testes CatalogAPI e 33 verificações integradas da stack
+de métricas passaram.
+
 Microsserviço de catálogo evoluído para a Fase 3 do Tech Challenge FIAP.
 Mantém CRUD, compra e biblioteca, acrescentando Redis às consultas públicas.
 A baseline da Fase 2 está preservada na tag `fase-2-final`.
