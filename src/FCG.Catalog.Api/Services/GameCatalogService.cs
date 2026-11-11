@@ -8,7 +8,8 @@ namespace FCG.Catalog.Api.Services;
 public sealed class GameCatalogService(
     IGameRepository gameRepository,
     IUnitOfWork unitOfWork,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IGameSearchOutbox searchOutbox)
     : IGameCatalogService
 {
     public async Task<GameResponse> CreateAsync(
@@ -23,6 +24,7 @@ public sealed class GameCatalogService(
             timeProvider.GetUtcNow().UtcDateTime);
 
         await gameRepository.AddAsync(game, cancellationToken);
+        await searchOutbox.AddAsync(game, game.CreatedAtUtc, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
 
         return GameMappings.ToResponse(game);
@@ -65,6 +67,7 @@ public sealed class GameCatalogService(
             request.Developer,
             timeProvider.GetUtcNow().UtcDateTime);
 
+        await searchOutbox.AddAsync(game, game.UpdatedAtUtc!.Value, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
 
         return GameMappings.ToResponse(game);
@@ -77,7 +80,13 @@ public sealed class GameCatalogService(
         var game = await gameRepository.GetByIdAsync(id, cancellationToken)
             ?? throw new DomainValidationException("Game not found.");
 
+        if (!game.IsActive)
+        {
+            return;
+        }
+
         game.Deactivate(timeProvider.GetUtcNow().UtcDateTime);
+        await searchOutbox.AddAsync(game, game.UpdatedAtUtc!.Value, cancellationToken);
         await unitOfWork.SaveChangesAsync(cancellationToken);
     }
 }
