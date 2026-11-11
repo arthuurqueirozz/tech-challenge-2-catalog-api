@@ -19,6 +19,7 @@ public sealed class GameConfiguration : IEntityTypeConfiguration<Game>
             .HasMaxLength(Game.MaxDeveloperLength);
         builder.Property(game => game.Price)
             .HasPrecision(18, 2);
+        builder.Property(game => game.SearchRevision).HasDefaultValue(1L).IsConcurrencyToken();
         builder.HasIndex(game => game.Title);
     }
 }

@@ -6,10 +6,11 @@ namespace FCG.Catalog.Infrastructure.Persistence;
 public static class DatabaseInitialiser
 {
     public static async Task InitialiseCatalogDatabaseAsync(
-        this IServiceProvider services)
+        this IServiceProvider services,
+        CancellationToken cancellationToken = default)
     {
         await using var scope = services.CreateAsyncScope();
         var context = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        await context.Database.MigrateAsync();
+        await context.Database.MigrateAsync(cancellationToken);
     }
 }

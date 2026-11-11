@@ -5,6 +5,9 @@ metadata:
 data:
   ASPNETCORE_ENVIRONMENT: "Production"
   ASPNETCORE_HTTP_PORTS: "8080"
+  CatalogCache__Configuration: "redis:6379"
+  CatalogCache__TtlSeconds: "60"
+  CatalogCache__TimeoutMilliseconds: "500"
   Jwt__Issuer: "FCG"
   Jwt__Audience: "FCG"
   RabbitMq__Host: "rabbitmq"

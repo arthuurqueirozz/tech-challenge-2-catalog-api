@@ -1,0 +1,219 @@
+name: Fase 4 CI and deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore
+        run: dotnet restore TechChallenge.Catalog.sln --locked-mode
+      - name: Build
+        run: dotnet build TechChallenge.Catalog.sln -c Release --no-restore
+      - name: Run xUnit executable
+        run: dotnet run --project tests/FCG.Catalog.Tests/FCG.Catalog.Tests.csproj -c Release --no-build --no-restore
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: fase4-catalog-deploy
+      cancel-in-progress: false
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      AWS_SESSION_EXPIRES_AT: ${{ vars.AWS_SESSION_EXPIRES_AT }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+      SSM_NODE_INSTANCE_ID: ${{ vars.SSM_NODE_INSTANCE_ID }}
+      SSM_TUNNEL_DOCUMENT_NAME: ${{ vars.SSM_TUNNEL_DOCUMENT_NAME }}
+      K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+      ORCHESTRATION_REPOSITORY: ${{ vars.ORCHESTRATION_REPOSITORY }}
+      ORCHESTRATION_REF: ${{ vars.ORCHESTRATION_REF }}
+      SMOKE_URL: ${{ vars.SMOKE_URL }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Discard superseded candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          head=$(curl --fail --silent --show-error -H "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/git/ref/heads/main" | jq -er '.object.sha')
+          if [[ "$head" == "$GITHUB_SHA" ]]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'Candidate superseded; no image publication or deployment.'
+          fi
+      - name: Validate deployment configuration and session window
+        if: steps.candidate.outputs.current == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime, os, re, urllib.parse
+          required = (
+              "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+              "AWS_SESSION_EXPIRES_AT", "AWS_ACCOUNT_ID", "AWS_REGION",
+              "ECR_REPOSITORY", "EKS_CLUSTER_NAME", "K8S_NAMESPACE",
+              "SSM_NODE_INSTANCE_ID", "SSM_TUNNEL_DOCUMENT_NAME",
+              "ORCHESTRATION_REPOSITORY", "ORCHESTRATION_REF", "SMOKE_URL",
+          )
+          for name in required:
+              if not os.environ.get(name, "").strip():
+                  raise SystemExit("Missing deployment configuration: " + name)
+          patterns = {
+              "AWS_ACCOUNT_ID": r"[0-9]{12}",
+              "AWS_REGION": r"[a-z]{2}-[a-z]+-[0-9]+",
+              "ECR_REPOSITORY": r"[a-z0-9]+(?:[._/-][a-z0-9]+)*",
+              "EKS_CLUSTER_NAME": r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}",
+              "K8S_NAMESPACE": r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?",
+              "ORCHESTRATION_REPOSITORY": r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+              "ORCHESTRATION_REF": r"[0-9a-f]{40}",
+              "SSM_NODE_INSTANCE_ID": r"i-(?:[0-9a-f]{8}|[0-9a-f]{17})",
+              "SSM_TUNNEL_DOCUMENT_NAME": r"fcg-fase4-eks-tunnel",
+          }
+          for name, pattern in patterns.items():
+              if not re.fullmatch(pattern, os.environ[name]):
+                  raise SystemExit("Invalid deployment configuration: " + name)
+          if os.environ["AWS_REGION"] != "us-east-2" or os.environ["K8S_NAMESPACE"] != "fcg-catalog":
+              raise SystemExit("Deployments must use the approved region and API namespace.")
+          now = datetime.datetime.now(datetime.timezone.utc)
+          if not datetime.datetime(2026, 11, 13, 23, tzinfo=datetime.timezone.utc) <= now < datetime.datetime(2026, 11, 18, 23, tzinfo=datetime.timezone.utc):
+              raise SystemExit("Deployment is outside the approved 120-hour cloud window.")
+          url = urllib.parse.urlsplit(os.environ["SMOKE_URL"])
+          if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment or url.path not in ("/status/catalog", "/status/catalog/"):
+              raise SystemExit("SMOKE_URL must be the HTTPS gateway status route for catalog.")
+          try:
+              expiry = datetime.datetime.fromisoformat(os.environ["AWS_SESSION_EXPIRES_AT"].replace("Z", "+00:00"))
+              if expiry.tzinfo is None:
+                  raise ValueError()
+              remaining = (expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+          except (ValueError, OverflowError):
+              raise SystemExit("AWS_SESSION_EXPIRES_AT must be an ISO-8601 timestamp with timezone.")
+          if not 1200 <= remaining <= 3900:
+              raise SystemExit("Renew the restricted STS session: require 20-65 minutes remaining.")
+          PY
+      - name: Build versioned image
+        if: steps.candidate.outputs.current == 'true'
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+          tag="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          image="$registry/$ECR_REPOSITORY:$tag"
+          docker build --build-arg "BUILD_SHA=$GITHUB_SHA" --tag "$image" .
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Checkout reviewed orchestration commit
+        if: steps.candidate.outputs.current == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ vars.ORCHESTRATION_REPOSITORY }}
+          ref: ${{ vars.ORCHESTRATION_REF }}
+          path: orchestration
+          token: ${{ secrets.ORCHESTRATION_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Validate actual identity and publish image
+        if: steps.candidate.outputs.current == 'true'
+        id: publish
+        env:
+          REGISTRY: ${{ steps.image.outputs.registry }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime, os
+          expiry = datetime.datetime.fromisoformat(os.environ["AWS_SESSION_EXPIRES_AT"].replace("Z", "+00:00"))
+          if (expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds() < 1200:
+              raise SystemExit("Renew STS session before publishing/deploying.")
+          PY
+          identity=$(aws sts get-caller-identity --region "$AWS_REGION" --output json)
+          [[ "$(jq -r .Account <<< "$identity")" == "$AWS_ACCOUNT_ID" ]] || { echo 'Unexpected AWS account.'; exit 1; }
+          arn=$(jq -r .Arn <<< "$identity")
+          [[ "$arn" == "arn:aws:sts::$AWS_ACCOUNT_ID:assumed-role/fiap-f4-catalog-deploy/"* ]] || { echo 'Expected the restricted API deploy role.'; exit 1; }
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+          docker push "$IMAGE"
+          digest=$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Registry did not return an image digest.'; exit 1; }
+          echo "image=$REGISTRY/$ECR_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+      - name: Prepare kubectl and check candidate again
+        if: steps.candidate.outputs.current == 'true'
+        id: ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          head=$(curl --fail --silent --show-error -H "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/git/ref/heads/main" | jq -er '.object.sha')
+          if [[ "$head" != "$GITHUB_SHA" ]]; then
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'Candidate superseded after build; cluster unchanged.'
+            exit 0
+          fi
+          python3 - <<'PY'
+          import datetime, os
+          expiry = datetime.datetime.fromisoformat(os.environ["AWS_SESSION_EXPIRES_AT"].replace("Z", "+00:00"))
+          if (expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds() < 1200:
+              raise SystemExit("Renew STS session before cluster changes.")
+          PY
+          mkdir -p "$RUNNER_TEMP/fcg-bin"
+          curl --fail --silent --show-error --location https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubectl -o "$RUNNER_TEMP/fcg-bin/kubectl"
+          curl --fail --silent --show-error --location https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubectl.sha256 -o "$RUNNER_TEMP/fcg-bin/kubectl.sha256"
+          (cd "$RUNNER_TEMP/fcg-bin" && echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check)
+          chmod +x "$RUNNER_TEMP/fcg-bin/kubectl"
+          echo "$RUNNER_TEMP/fcg-bin" >> "$GITHUB_PATH"
+          echo 'current=true' >> "$GITHUB_OUTPUT"
+      - name: Prepare the pinned Session Manager client
+        if: steps.ready.outputs.current == 'true'
+        shell: pwsh
+        run: |
+          $bin = & ./orchestration/scripts/install-ssm-plugin.ps1 -DestinationPath "$env:RUNNER_TEMP/ssm-plugin"
+          Add-Content $env:GITHUB_PATH $bin
+      - name: Migrate, roll out and verify gateway version
+        if: steps.ready.outputs.current == 'true'
+        env:
+          DEPLOY_IMAGE: ${{ steps.publish.outputs.image }}
+        shell: pwsh
+        run: |
+          & ./orchestration/scripts/deploy-cloud-api.ps1 -Service catalog -AccountId $env:AWS_ACCOUNT_ID -Region $env:AWS_REGION -ClusterName $env:EKS_CLUSTER_NAME -NodeInstanceId $env:SSM_NODE_INSTANCE_ID -TunnelDocumentName $env:SSM_TUNNEL_DOCUMENT_NAME -Kubeconfig "$env:RUNNER_TEMP/fcg-kubeconfig" -Context fcg-fase4 -Namespace $env:K8S_NAMESPACE -Image $env:DEPLOY_IMAGE -BuildSha $env:GITHUB_SHA -OrchestrationRef $env:ORCHESTRATION_REF -DeploymentId "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" -SmokeUrl $env:SMOKE_URL -OutputPath "$env:RUNNER_TEMP/catalog-deploy.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $summary = Get-Content "$env:RUNNER_TEMP/catalog-deploy.json" -Raw
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Catalog deployment"
+          Add-Content $env:GITHUB_STEP_SUMMARY $summary
+      - name: Remove temporary credentials and kubeconfig
+        if: always()
+        shell: bash
+        run: |
+          docker logout "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com" >/dev/null 2>&1 || true
+          rm -f "$RUNNER_TEMP/fcg-kubeconfig"
+

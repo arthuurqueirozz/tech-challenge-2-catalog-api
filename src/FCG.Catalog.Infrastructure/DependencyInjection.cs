@@ -1,6 +1,7 @@
 using FCG.Catalog.Domain.Abstractions;
 using FCG.Catalog.Infrastructure.Persistence;
 using FCG.Catalog.Infrastructure.Persistence.Repositories;
+using FCG.Catalog.Infrastructure.Persistence.Search;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,6 +28,7 @@ public static class DependencyInjection
                     errorNumbersToAdd: null)));
 
         services.AddScoped<IGameRepository, GameRepository>();
+        services.AddScoped<IGameSearchOutbox, GameSearchOutbox>();
         services.AddScoped<IUserGameRepository, UserGameRepository>();
         services.AddScoped<IUnitOfWork>(
             provider => provider.GetRequiredService<CatalogDbContext>());
