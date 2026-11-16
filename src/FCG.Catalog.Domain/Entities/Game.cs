@@ -18,6 +18,7 @@ public sealed class Game
     public string? Developer { get; private set; }
     public decimal Price { get; private set; }
     public bool IsActive { get; private set; }
+    public long SearchRevision { get; private set; }
     public DateTime CreatedAtUtc { get; private set; }
     public DateTime? UpdatedAtUtc { get; private set; }
 
@@ -38,6 +39,7 @@ public sealed class Game
             Developer = NormalizeOptional(developer),
             Price = price,
             IsActive = true,
+            SearchRevision = 1,
             CreatedAtUtc = EnsureUtc(createdAtUtc)
         };
     }
@@ -56,6 +58,7 @@ public sealed class Game
 
         Validate(title, description, developer, price);
 
+        SearchRevision = checked(SearchRevision + 1);
         Title = title.Trim();
         Description = NormalizeOptional(description);
         Developer = NormalizeOptional(developer);
@@ -70,6 +73,7 @@ public sealed class Game
             return;
         }
 
+        SearchRevision = checked(SearchRevision + 1);
         IsActive = false;
         UpdatedAtUtc = EnsureUtc(updatedAtUtc);
     }

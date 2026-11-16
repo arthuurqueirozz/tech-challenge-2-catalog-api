@@ -13,27 +13,22 @@ public static class GamesEndpoints
         var group = app.MapGroup("/api/games").WithTags("Games");
 
         group.MapGet("/", ListAsync)
-            .WithName("ListGames")
-            .WithOpenApi();
+            .WithName("ListGames");
 
         group.MapGet("/{id:guid}", GetByIdAsync)
-            .WithName("GetGameById")
-            .WithOpenApi();
+            .WithName("GetGameById");
 
         group.MapPost("/", CreateAsync)
             .RequireAuthorization("Admin")
-            .WithName("CreateGame")
-            .WithOpenApi();
+            .WithName("CreateGame");
 
         group.MapPut("/{id:guid}", UpdateAsync)
             .RequireAuthorization("Admin")
-            .WithName("UpdateGame")
-            .WithOpenApi();
+            .WithName("UpdateGame");
 
         group.MapDelete("/{id:guid}", DeleteAsync)
             .RequireAuthorization("Admin")
-            .WithName("DeleteGame")
-            .WithOpenApi();
+            .WithName("DeleteGame");
 
         return app;
     }

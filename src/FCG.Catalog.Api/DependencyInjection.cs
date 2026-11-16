@@ -11,7 +11,10 @@ using FCG.Catalog.Infrastructure.Persistence;
 using FluentValidation;
 using MassTransit;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Caching.StackExchangeRedis;
+using StackExchange.Redis;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
@@ -25,6 +28,25 @@ public static class DependencyInjection
     {
         services.AddSingleton(TimeProvider.System);
         services.AddCatalogInfrastructure(configuration);
+
+        services.AddOptions<CatalogCacheOptions>()
+            .Bind(configuration.GetSection(CatalogCacheOptions.SectionName))
+            .ValidateDataAnnotations()
+            .Validate(value => !string.IsNullOrWhiteSpace(value.Configuration), "CatalogCache:Configuration is required.")
+            .ValidateOnStart();
+        services.AddStackExchangeRedisCache(_ => { });
+        services.AddOptions<RedisCacheOptions>().Configure<IOptions<CatalogCacheOptions>>((redis, configured) =>
+        {
+            var settings = configured.Value;
+            var connection = ConfigurationOptions.Parse(settings.Configuration);
+            connection.AbortOnConnectFail = false;
+            connection.ConnectRetry = 0;
+            connection.ConnectTimeout = settings.TimeoutMilliseconds;
+            connection.AsyncTimeout = settings.TimeoutMilliseconds;
+            connection.SyncTimeout = settings.TimeoutMilliseconds;
+            connection.BacklogPolicy = BacklogPolicy.FailFast;
+            redis.ConfigurationOptions = connection;
+        });
 
         services
             .AddOptions<JwtOptions>()
@@ -79,7 +101,8 @@ public static class DependencyInjection
         });
 
         services.AddValidatorsFromAssemblyContaining<CreateGameRequestValidator>();
-        services.AddScoped<IGameCatalogService, GameCatalogService>();
+        services.AddScoped<GameCatalogService>();
+        services.AddScoped<IGameCatalogService, CachedGameCatalogService>();
         services.AddScoped<IUserLibraryService, UserLibraryService>();
         services.AddScoped<IPurchaseService, PurchaseService>();
         services.AddScoped<IOrderPlacedPublisher, MassTransitOrderPlacedPublisher>();
@@ -144,10 +167,14 @@ public static class DependencyInjection
             .AddHealthChecks()
             .AddDbContextCheck<CatalogDbContext>(
                 "catalog-sqlserver",
-                tags: ["ready"])
+                tags: ["ready"],
+                customTestQuery: async (context, cancellationToken) =>
+                    await context.Database.CanConnectAsync(cancellationToken)
+                    && !(await context.Database.GetPendingMigrationsAsync(cancellationToken)).Any())
             .AddCheck<RabbitMqHealthCheck>(
                 "rabbitmq",
-                tags: ["ready"]);
+                tags: ["ready"])
+            .AddCheck<RedisCacheHealthCheck>("redis-cache", tags: ["cache"]);
 
         return services;
     }

@@ -1,6 +1,7 @@
 using FCG.Catalog.Api.Contracts.Games;
 using FCG.Catalog.Api.Services;
 using FCG.Catalog.Infrastructure.Persistence.Repositories;
+using FCG.Catalog.Infrastructure.Persistence.Search;
 using FCG.Catalog.Tests.Infrastructure;
 
 namespace FCG.Catalog.Tests.Services;
@@ -17,7 +18,7 @@ public sealed class GameCatalogServiceTests
         var service = new GameCatalogService(
             repository,
             context,
-            new FixedTimeProvider(new DateTimeOffset(2026, 7, 8, 12, 0, 0, TimeSpan.Zero)));
+            new FixedTimeProvider(new DateTimeOffset(2026, 7, 8, 12, 0, 0, TimeSpan.Zero)), new GameSearchOutbox(context));
 
         var created = await service.CreateAsync(
             new CreateGameRequest(

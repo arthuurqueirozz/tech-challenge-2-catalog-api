@@ -17,12 +17,10 @@ public static class LibraryEndpoints
             .WithTags("Library");
 
         group.MapGet("/games", GetMyGamesAsync)
-            .WithName("GetMyLibrary")
-            .WithOpenApi();
+            .WithName("GetMyLibrary");
 
         group.MapPost("/games/{gameId:guid}", RequestPurchaseAsync)
-            .WithName("RequestGamePurchase")
-            .WithOpenApi();
+            .WithName("RequestGamePurchase");
 
         return app;
     }
